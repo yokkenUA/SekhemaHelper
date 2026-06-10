@@ -16,9 +16,11 @@ highest-value path so you can pick the next room at a glance without leaving the
 - **Per-room scoring** = base + room type + affliction + reward + connectivity (a small bonus for
   rooms with more than one exit, to keep options open). Optional **debug overlay** prints each
   room's weight and the breakdown of every contributing term on top of the room.
-- **Weight profiles.** Two built in — **Default** (balanced clear) and **No-Hit** (heavily
-  penalises deadly afflictions and the timed Hourglass room). Switch live from the settings combo;
-  the active profile is saved to the plugin's own `config\settings.txt`.
+- **Weight profiles, fully tunable.** Two built in — **Default** (balanced clear) and **No-Hit**
+  (heavily penalises deadly afflictions and the timed Hourglass room). Every room-type / affliction
+  / reward weight is editable right in the settings panel via sliders and saved to the plugin's own
+  `config\settings.txt`, so you can tune scoring to your build; changes apply live and **Reset this
+  profile to defaults** restores the built-in values. Switch profiles live from the combo.
 - **Dynamic affliction weights from your stats.** Defence-dependent afflictions are scored against
   your live character: *Iron Manacles* / *Shattered Shield* / *Corrosive Concoction* scale with your
   effective Evasion / Energy Shield, and *Worn Sandals* is treated as harmless when **Queen of the
@@ -31,8 +33,6 @@ highest-value path so you can pick the next room at a glance without leaving the
   their `Treasure` room ids and scored from the profile's reward table.
 - Resolves the Sanctum map panel from the game UI each frame and shows an always-on status line
   (when Debug is on) so a missing panel / closed map is visible instead of a blank overlay.
-- **FK dump tool** (Debug): writes every room's content data rows to `config\fk_dump.txt` — used to
-  map new room / affliction / reward ids after a patch.
 
 ## Requirements
 
@@ -80,11 +80,15 @@ This plugin is meant to live inside a GH source tree, because it references
 | **Draw Best Path** | `on` | Toggle the route overlay. |
 | **Frame Thickness** | `4` | Line thickness (px) of the path frames (1–10). |
 | **Best Path Color** | green | Color of the route frames. |
-| **Debug (show weights)** | `off` | Print each room's weight + term breakdown, a status HUD, and enable the FK dump button. |
+| **Debug (show weights)** | `off` | Print each room's weight + term breakdown and a status HUD on the map. |
 | **Debug Text / Background Color** | white / black | Colors for the debug overlay. |
 
-When Debug is on, **Dump room FK → config\fk_dump.txt** writes the current floor's data rows to a
-file (open the Trial map first) for mapping new ids.
+### Weights — *(active profile)*
+
+The **Weights** section edits every room-type, affliction and reward weight of the selected profile
+with sliders (higher = more desirable; drag to adjust, Ctrl+click to type). Changes apply live and
+are saved to `config\settings.txt`, loading back with the profile next session. **Reset this profile
+to defaults** restores the built-in values.
 
 ## Credits
 

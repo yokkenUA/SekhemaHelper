@@ -68,11 +68,55 @@ namespace SekhemaHelper
             {
                 ColorSwatch("Debug Text Color", ref Settings.TextColor);
                 ColorSwatch("Debug Background", ref Settings.BackgroundColor);
-                if (ImGui.Button("Dump room FK -> config\\fk_dump.txt"))
-                    this.dumpRequested = true;
-                ImGui.SameLine();
-                ImGui.TextDisabled("(open the Trial map first)");
             }
+
+            DrawWeightSettings();
+        }
+
+        // Edit the active profile's weights in place. Everything lives in Settings.Profiles, which is
+        // serialized to config\settings.txt, so edits persist and load with the profile; the
+        // WeightCalculator reads the active profile every frame, so changes take effect live.
+        private void DrawWeightSettings()
+        {
+            if (!Settings.Profiles.TryGetValue(Settings.CurrentProfile, out var profile) || profile == null)
+                return;
+
+            ImGui.SeparatorText($"Weights — {Settings.CurrentProfile}");
+            ImGui.TextDisabled("Higher = more desirable. Drag to adjust (Ctrl+click to type). Saved to config.");
+
+            if (ImGui.Button("Reset this profile to defaults"))
+            {
+                Settings.Profiles[Settings.CurrentProfile] = Settings.CurrentProfile == "No-Hit"
+                    ? ProfileContent.CreateNoHitProfile()
+                    : ProfileContent.CreateDefaultProfile();
+                return;
+            }
+
+            DrawWeightGroup("Room types", profile.RoomTypeWeights);
+            DrawWeightGroup("Afflictions", profile.AfflictionWeights);
+            DrawWeightGroup("Rewards", profile.RewardWeights);
+        }
+
+        // One collapsible group of {name → weight} sliders. Edits the dictionary value in place.
+        private static void DrawWeightGroup(string title, Dictionary<string, float> weights)
+        {
+            if (weights == null || weights.Count == 0)
+                return;
+            if (!ImGui.CollapsingHeader($"{title} ({weights.Count})"))
+                return;
+
+            ImGui.PushID(title);
+            ImGui.Indent();
+            var keys = new List<string>(weights.Keys);
+            keys.Sort(StringComparer.OrdinalIgnoreCase);
+            foreach (var key in keys)
+            {
+                float v = weights[key];
+                if (ImGui.DragFloat(key, ref v, 10f, -1_000_000f, 1_000_000f, "%.0f"))
+                    weights[key] = v;
+            }
+            ImGui.Unindent();
+            ImGui.PopID();
         }
 
         public override void DrawUI()
