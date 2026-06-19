@@ -155,9 +155,11 @@ namespace SekhemaHelper
 
             // Player stats for dynamic affliction weights (best-effort; deltas summed).
             this.weightCalculator ??= new WeightCalculator(Settings);
-            ReadPlayerStats(out var evasion, out var es, out var qotf);
+            ReadPlayerStats(out var evasion, out var es, out var armour, out var life, out var qotf);
             this.weightCalculator.Evasion = evasion;
             this.weightCalculator.EnergyShield = es;
+            this.weightCalculator.Armour = armour;
+            this.weightCalculator.Life = life;
             this.weightCalculator.HasQueenOfTheForest = qotf;
 
             // Weights per room.
@@ -406,20 +408,29 @@ namespace SekhemaHelper
             return true;
         }
 
-        private static void ReadPlayerStats(out int evasion, out int energyShield, out bool qotf)
+        private static void ReadPlayerStats(out int evasion, out int energyShield, out int armour, out int life, out bool qotf)
         {
             evasion = 0;
             energyShield = 0;
+            armour = 0;
+            life = 0;
             qotf = false;
             var player = Core.States.InGameStateObject.CurrentAreaInstance.Player;
             if (player == null || !player.TryGetComponent<Stats>(out var stats))
                 return;
             // Confirmed live 2026-06-10 (Research --stats vs character sheet):
             //  - effective Evasion / Max ES match StatsChangedByItems (NOT the sum of both dicts).
+            //    The items layer is the player's OWN gear/passive total; the buff layer can carry
+            //    transient externals (e.g. another player's ES aura), which must NOT count for a
+            //    solo Sekhema run, so we read the items layer here.
             //  - the Queen-of-the-Forest stat is granted via the buff/action layer
             //    (key 9490 movement_speed_is_only_base_…_per_x_evasion_rating: items=0, buffs>0 when worn).
+            // Armour (235) and Max Life (239) added for the relevance-based affliction model
+            // (see WeightCalculator.DynamicAffliction). Stat ids verified vs game_dat/Stats.tsv.
             evasion = ItemStat(stats, GameStats.evasion_rating);
             energyShield = ItemStat(stats, GameStats.maximum_energy_shield);
+            armour = ItemStat(stats, GameStats.armour);
+            life = ItemStat(stats, GameStats.maximum_life);
             qotf = StatValue(stats, GameStats.movement_speed_is_only_base_positive_1percentage_per_x_evasion_rating) > 0;
         }
 
