@@ -68,6 +68,11 @@ namespace SekhemaHelper
             {
                 ColorSwatch("Debug Text Color", ref Settings.TextColor);
                 ColorSwatch("Debug Background", ref Settings.BackgroundColor);
+                // Dump every room's content FK pairs (+ the FloorData content vector) to
+                // config\fk_dump.txt on the next frame the Trial map is open. Use to verify
+                // classification / re-map FK offsets after a client patch.
+                if (ImGui.Button("Dump FK -> config\\fk_dump.txt"))
+                    this.dumpRequested = true;
             }
 
             DrawWeightSettings();
@@ -202,54 +207,70 @@ namespace SekhemaHelper
             }
         }
 
-        // Classify each revealed room from its content FK pairs (widget+0x4D8, stride 0x10, up to 3):
+        // Classify each revealed room from the FloorData content vector (FloorData+0x18, stride 0x40),
+        // each entry keyed by (layer,room) in its first two bytes and carrying up to 3 content FK
+        // pairs {row, table} at +0x08 + k*0x10:
         //   SanctumRooms.dat  -> fight room "Caverns_<TYPE>_NN" (type) OR "Caverns_Treasure..." (reward)
         //   SanctumPersistentEffects.dat -> affliction (display name at row+0x28)
-        // Only revealed rooms carry content; deeper rooms stay unclassified (weight = base).
+        //
+        // This reads the game-data structure directly (verified live 2026-06-20: ids like
+        // "Caverns_Arena_02" and affliction names like "Fiendish Wings" resolve here). It replaces the
+        // old per-widget read at widget+0x4D8, which a client patch left empty — every room then fell
+        // back to base weight, so editing the weight tables had no effect on the chosen path. Only
+        // revealed rooms have entries in this vector; deeper rooms stay unclassified (weight = base).
         private static void ClassifyRooms(SekhemaFloor floor)
         {
-            foreach (var layer in floor.Layers)
-                foreach (var room in layer)
+            if (floor.FloorDataAddr == IntPtr.Zero)
+                return;
+            var first = Mem.Read<IntPtr>(floor.FloorDataAddr + 0x18);
+            var last = Mem.Read<IntPtr>(floor.FloorDataAddr + 0x20);
+            if (first == IntPtr.Zero || last.ToInt64() <= first.ToInt64())
+                return;
+            long count = (last.ToInt64() - first.ToInt64()) / 0x40;
+            for (long i = 0; i < count && i < 512; i++)
+            {
+                var e = first + (int)(i * 0x40);
+                int layer = Mem.Read<byte>(e + 0x00);
+                int idx = Mem.Read<byte>(e + 0x01);
+                var room = floor.Get(layer, idx);
+                if (room == null)
+                    continue;
+                for (int k = 0; k < 3; k++)
                 {
-                    if (room.WidgetAddr == IntPtr.Zero)
+                    var rowPtr = Mem.Read<IntPtr>(e + 0x08 + k * 0x10);
+                    var tablePtr = Mem.Read<IntPtr>(e + 0x10 + k * 0x10);
+                    if (rowPtr == IntPtr.Zero || tablePtr == IntPtr.Zero)
                         continue;
-                    for (int k = 0; k < 3; k++)
-                    {
-                        var slot = room.WidgetAddr + 0x4D8 + k * 0x10;
-                        var rowPtr = Mem.Read<IntPtr>(slot);
-                        var tablePtr = Mem.Read<IntPtr>(slot + 8);
-                        if (rowPtr == IntPtr.Zero || tablePtr == IntPtr.Zero)
-                            continue;
-                        var tpath = Mem.ReadWideString(Mem.Read<IntPtr>(tablePtr + 0x08), 96);
-                        if (string.IsNullOrEmpty(tpath))
-                            continue;
+                    var tpath = Mem.ReadWideString(Mem.Read<IntPtr>(tablePtr + 0x08), 96);
+                    if (string.IsNullOrEmpty(tpath))
+                        continue;
 
-                        if (tpath.IndexOf("SanctumPersistentEffects", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (tpath.IndexOf("SanctumPersistentEffects", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        var name = Mem.ReadWideString(Mem.Read<IntPtr>(rowPtr + 0x28), 48);
+                        if (!string.IsNullOrEmpty(name))
+                            room.Affliction = name;
+                    }
+                    else if (tpath.IndexOf("SanctumRooms", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        var id = Mem.ReadWideString(Mem.Read<IntPtr>(rowPtr + 0x00), 64);
+                        if (string.IsNullOrEmpty(id))
+                            continue;
+                        if (id.IndexOf("Treasure", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
-                            var name = Mem.ReadWideString(Mem.Read<IntPtr>(rowPtr + 0x28), 48);
-                            if (!string.IsNullOrEmpty(name))
-                                room.Affliction = name;
+                            var rw = MapReward(id);
+                            if (rw != null)
+                                room.Reward = rw;
                         }
-                        else if (tpath.IndexOf("SanctumRooms", StringComparison.OrdinalIgnoreCase) >= 0)
+                        else
                         {
-                            var id = Mem.ReadWideString(Mem.Read<IntPtr>(rowPtr + 0x00), 64);
-                            if (string.IsNullOrEmpty(id))
-                                continue;
-                            if (id.IndexOf("Treasure", StringComparison.OrdinalIgnoreCase) >= 0)
-                            {
-                                var rw = MapReward(id);
-                                if (rw != null)
-                                    room.Reward = rw;
-                            }
-                            else
-                            {
-                                var t = ExtractRoomType(id);
-                                if (t != null)
-                                    room.RoomType = t;
-                            }
+                            var t = ExtractRoomType(id);
+                            if (t != null)
+                                room.RoomType = t;
                         }
                     }
                 }
+            }
         }
 
         // Map the SanctumRooms.Id token (parts[1]) to the in-game DISPLAY name the player sees, which
