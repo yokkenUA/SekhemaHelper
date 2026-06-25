@@ -27,9 +27,9 @@ namespace SekhemaHelper
         // / not yet read). Off = Merchant always weighted by its profile value.
         public bool SuppressMerchantLowWater = true;
         public int MerchantWaterThreshold = 250;        // 100..1000
-        // Don't recommend honour-restoration reward rooms (Fountain / Large Fountain / honour shrine) while
-        // current Honour is ABOVE this percentage: already topped up, so the restore is wasted. Skipped
-        // when honour is unknown. Off = those rooms always weighted by their profile value.
+        // Don't recommend honour-SHRINE reward rooms while current Honour is ABOVE this percentage:
+        // already topped up, so the restore is wasted. Fountains are NOT affected (they restore Sacred
+        // Water, not Honour). Skipped when honour is unknown. Off = shrines always weighted normally.
         public bool SuppressHonourRestoreHighPct = true;
         public int HonourRestoreThresholdPct = 80;      // 30..100
 

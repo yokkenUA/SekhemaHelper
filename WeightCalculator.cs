@@ -136,8 +136,9 @@ namespace SekhemaHelper
                 return 0;
 
             // SOFT resource-aware suppression. When a reward is pointless given the live resource state
-            // (Merchant with too little Sacred Water to spend; honour restore while honour is already
-            // high) it does NOT get buried — it just loses its profile bonus and takes a small deterrent.
+            // (Merchant with too little Sacred Water to spend; honour SHRINE while honour is already
+            // high — fountains restore water not honour, so they are NOT touched here) it does NOT get
+            // buried — it just loses its profile bonus and takes a small deterrent.
             // The path still goes through it when every alternative is meaningfully worse (a bad
             // affliction/room type, hundreds-to-thousands of weight, easily outweighs this); an
             // equally-good alternative simply wins. Only applied when the resource value is KNOWN.
@@ -147,7 +148,7 @@ namespace SekhemaHelper
                 debug.AppendLine($"{room.Reward}:{SuppressedRewardPenalty:F0} (low water {Water}<{settings.MerchantWaterThreshold})");
                 return SuppressedRewardPenalty;
             }
-            if (settings.SuppressHonourRestoreHighPct && IsHonourRestoreReward(room.Reward) &&
+            if (settings.SuppressHonourRestoreHighPct && IsHonourShrineReward(room.Reward) &&
                 HonourPct >= 0 && HonourPct > settings.HonourRestoreThresholdPct)
             {
                 debug.AppendLine($"{room.Reward}:{SuppressedRewardPenalty:F0} (honour {HonourPct:F0}%>{settings.HonourRestoreThresholdPct}%)");
@@ -158,9 +159,10 @@ namespace SekhemaHelper
             return w;
         }
 
-        // Honour-restoration reward rooms: the two fountains and any honour shrine ("Honour" / "Honour <deity>").
-        private static bool IsHonourRestoreReward(string reward) =>
-            reward == "Fountain" || reward == "Large Fountain" ||
+        // Honour-restoration reward rooms = honour SHRINES only ("Honour" / legacy "Honour <deity>").
+        // Fountains are NOT here: in PoE2 Sanctum a Fountain restores Sacred Water, not Honour, so it
+        // must not be suppressed by the honour rule.
+        private static bool IsHonourShrineReward(string reward) =>
             reward.StartsWith("Honour", System.StringComparison.Ordinal);
 
         // Connectivity (number of forward exits) is consumed by PathFinder as a lexicographic
