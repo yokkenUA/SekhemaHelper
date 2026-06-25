@@ -22,12 +22,22 @@ namespace SekhemaHelper
         public int Life;
         public bool HasQueenOfTheForest;
 
+        // Live resources for the current frame (set by the core each refresh). <0 = unknown → the
+        // resource-aware reward suppression below is skipped (not in a Trial / not yet read).
+        public int Water = -1;
+        public double HonourPct = -1;
+
         // Relevance model tuning. K = max penalty when a curse removes the player's entire main defence
         // layer (matches the legacy "strongly avoid" magnitude). RefMitigation floors the Armour+Evasion
         // denominator so a build with little total mitigation rating scales its penalties down (nothing
         // meaningful to lose) instead of splitting 50/50 on noise.
         private const double K = 5000;
         private const double RefMitigation = 4000;
+
+        // Deterrent applied to a SOFT-suppressed reward (Merchant with no water / honour restore at high
+        // honour). Sized like a minor affliction: enough to lose to an equally-good alternative, far too
+        // small to bury the room when every other path is worse. NOT a hard "never pick".
+        private const double SuppressedRewardPenalty = -300;
 
         public WeightCalculator(SekhemaHelperSettings settings) => this.settings = settings;
 
@@ -122,13 +132,36 @@ namespace SekhemaHelper
 
         private double RewardWeight(SekhemaRoom room, ProfileContent profile)
         {
-            if (!string.IsNullOrEmpty(room.Reward) && profile.RewardWeights.TryGetValue(room.Reward, out var w))
+            if (string.IsNullOrEmpty(room.Reward) || !profile.RewardWeights.TryGetValue(room.Reward, out var w))
+                return 0;
+
+            // SOFT resource-aware suppression. When a reward is pointless given the live resource state
+            // (Merchant with too little Sacred Water to spend; honour restore while honour is already
+            // high) it does NOT get buried — it just loses its profile bonus and takes a small deterrent.
+            // The path still goes through it when every alternative is meaningfully worse (a bad
+            // affliction/room type, hundreds-to-thousands of weight, easily outweighs this); an
+            // equally-good alternative simply wins. Only applied when the resource value is KNOWN.
+            if (settings.SuppressMerchantLowWater && room.Reward == "Merchant" &&
+                Water >= 0 && Water < settings.MerchantWaterThreshold)
             {
-                debug.AppendLine($"{room.Reward}:{w}");
-                return w;
+                debug.AppendLine($"{room.Reward}:{SuppressedRewardPenalty:F0} (low water {Water}<{settings.MerchantWaterThreshold})");
+                return SuppressedRewardPenalty;
             }
-            return 0;
+            if (settings.SuppressHonourRestoreHighPct && IsHonourRestoreReward(room.Reward) &&
+                HonourPct >= 0 && HonourPct > settings.HonourRestoreThresholdPct)
+            {
+                debug.AppendLine($"{room.Reward}:{SuppressedRewardPenalty:F0} (honour {HonourPct:F0}%>{settings.HonourRestoreThresholdPct}%)");
+                return SuppressedRewardPenalty;
+            }
+
+            debug.AppendLine($"{room.Reward}:{w}");
+            return w;
         }
+
+        // Honour-restoration reward rooms: the two fountains and any honour shrine ("Honour" / "Honour <deity>").
+        private static bool IsHonourRestoreReward(string reward) =>
+            reward == "Fountain" || reward == "Large Fountain" ||
+            reward.StartsWith("Honour", System.StringComparison.Ordinal);
 
         // Connectivity (number of forward exits) is consumed by PathFinder as a lexicographic
         // tie-breaker, not as a weight. Shown in the room debug text for visibility only.

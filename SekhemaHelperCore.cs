@@ -289,6 +289,27 @@ namespace SekhemaHelper
             }
 
             DrawWeightGroup("Room types", profile.RoomTypeWeights);
+
+            // Resource-aware reward suppression. SOFT: lowers the reward so an equally-good alternative is
+            // preferred, but the path still routes through it when every other option is worse. Lives on
+            // Settings (not per-profile). Grouped under Room types per the menu layout.
+            ImGui.Indent();
+            ImGui.Checkbox("Avoid Merchant when water below", ref Settings.SuppressMerchantLowWater);
+            if (Settings.SuppressMerchantLowWater)
+            {
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(130f);
+                ImGui.SliderInt("##merchantwater", ref Settings.MerchantWaterThreshold, 100, 1000);
+            }
+            ImGui.Checkbox("Avoid honour restore when honour above", ref Settings.SuppressHonourRestoreHighPct);
+            if (Settings.SuppressHonourRestoreHighPct)
+            {
+                ImGui.SameLine();
+                ImGui.SetNextItemWidth(130f);
+                ImGui.SliderInt("##honourpct", ref Settings.HonourRestoreThresholdPct, 30, 100, "%d%%");
+            }
+            ImGui.Unindent();
+
             DrawWeightGroup("Afflictions", profile.AfflictionWeights);
             DrawWeightGroup("Rewards", profile.RewardWeights);
         }
@@ -416,6 +437,11 @@ namespace SekhemaHelper
             this.weightCalculator.Armour = armour;
             this.weightCalculator.Life = life;
             this.weightCalculator.HasQueenOfTheForest = qotf;
+
+            // Live resources for resource-aware reward suppression (Merchant vs water, honour restore vs
+            // honour%). -1 stays unknown → the calculator skips those rules.
+            this.weightCalculator.Water = liveWater;
+            this.weightCalculator.HonourPct = liveHonourPct;
 
             // Weights per room.
             var weights = new Dictionary<(int, int), double>();

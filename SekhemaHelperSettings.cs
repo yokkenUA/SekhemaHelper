@@ -21,6 +21,18 @@ namespace SekhemaHelper
         public bool DrawBestPath = true;
         public bool DebugEnable = false;
 
+        // --- Resource-aware room recommendations (use live Sacred Water / Honour readouts) ---
+        // Don't recommend the Merchant reward room while current Sacred Water is BELOW this threshold:
+        // with nothing to spend the detour isn't worth it. Skipped when water is unknown (not in a Trial
+        // / not yet read). Off = Merchant always weighted by its profile value.
+        public bool SuppressMerchantLowWater = true;
+        public int MerchantWaterThreshold = 250;        // 100..1000
+        // Don't recommend honour-restoration reward rooms (Fountain / Large Fountain / honour shrine) while
+        // current Honour is ABOVE this percentage: already topped up, so the restore is wasted. Skipped
+        // when honour is unknown. Off = those rooms always weighted by their profile value.
+        public bool SuppressHonourRestoreHighPct = true;
+        public int HonourRestoreThresholdPct = 80;      // 30..100
+
         // --- "Death crystal" (HourglassLethal) collection route, drawn in-world like Radar ---
         public bool DrawHazardRoute = true;
         public Vector4 HazardRouteColor = new(1f, 0.85f, 0.2f, 1f);
