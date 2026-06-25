@@ -23,8 +23,11 @@ namespace SekhemaHelper
 
         // Filled by RoomClassifier; null until FK->names is wired (SEKHEMA_WIP §8.12).
         public string RoomType;
-        public string Affliction;
         public string Reward;
+        // The affliction this room imposes (a "Curse"-type reward names a specific affliction). Read
+        // from the FloorData content vector via SanctumPersistentEffects.dat (name @ row+0x28) — pure
+        // game data, NOT the player's active-effect state. Drives AfflictionWeight in WeightCalculator.
+        public string Affliction;
 
         public Vector2 ScreenCenter => ScreenPos + ScreenSize * 0.5f;
     }

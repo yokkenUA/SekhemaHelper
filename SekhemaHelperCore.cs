@@ -20,6 +20,64 @@ namespace SekhemaHelper
         private string SettingPathname => Path.Join(DllDirectory, "config", "settings.txt");
         private WeightCalculator weightCalculator;
         private bool dumpRequested;
+        private bool scanHonourRequested;
+        private bool scanHonourByValueRequested;
+        private int honourScanCur;
+        private int honourScanMax;
+
+        // --- UITree navigation: index path primary, Flags-fingerprint fallback (docs/uitree-guide.md §2b) ---
+        // Child indices jump on game patches; each element's Flags field (+0x180) encodes its stable
+        // "role". Ideally we'd navigate purely by fp (like RunecraftHelper.WalkFp), but here the
+        // fingerprints are GENERIC containers (0x..F1 at every level) and the terminals are WEAK (water
+        // = "any numeric text", honour = "any bar geometry"), so an fp-walk could backtrack into the
+        // wrong sibling. So the index path stays AUTHORITATIVE while it resolves a terminal-valid leaf,
+        // and the harvested fp chain is the RECOVERY path used only when the index path breaks (a patch
+        // shifted indices) — the stable Flags still find the element though it moved. Re-harvest the
+        // chains after a client patch with the "Dump UI fingerprints" debug button.
+        private const int UiChildrenFirstOffset = 0x10;   // UiElementBase.ChildrensPtr.First (StdVector @ +0x10).
+        private const int UiElementFlagsOffset = 0x180;    // UiElementBaseOffset.Flags (uint).
+        private const int UiParentOffset = 0xB8;           // UiElementBaseOffset.ParentPtr.
+        private const int UiUnscaledSizeXOffset = 0x288;   // UiElementBaseOffset.UnscaledSize.X (float).
+        private const uint IsVisibleMask = 0x800;          // Flags bit 0x0B — masked before fp compare.
+
+        // Live Sacred Water, read from the Trial map panel's water counter text leaf.
+        // Index path SekhemasTrialMapPanel -> [1][0][0][1]; displayed value is the std::wstring at
+        // leaf+0x4C0 (docs §4.7.9). -1 = not yet read (rule degrades via WeightCalculator.WaterKnown).
+        // Fp chain harvested live 2026-06-23 (config\ui_fp_dump.txt); IsVisible masked at compare time.
+        private static int liveWater = -1;
+        private static readonly int[] WaterIndexPath = { 1, 0, 0, 1 };
+        private static readonly uint[] WaterFpChain = { 0x00502EF1, 0x00502EF1, 0x00502EF3, 0x00502EE1 };
+        private const int WaterTextWStringOffset = 0x4C0;
+
+        // Live key counts (Bronze/Silver/Gold), read from the same map-panel water+keys container as the
+        // water counter: SekhemasTrialMapPanel -> [1][0] is the container, where child[0]=water and
+        // child[1|2|3] are the three key tiers; each value leaf is child[N][1] with the displayed number
+        // as a std::wstring at leaf+0x4C0 (docs re-findings-sekhema §4.6). Read while the map is open,
+        // then cached so the HUD can show them when the map is closed (like water). -1 = not yet read.
+        private static int liveBronze = -1, liveSilver = -1, liveGold = -1;
+        // Map-OPEN source: from SekhemasTrialMapPanel (read after the visibility gate, like water).
+        private static readonly int[] BronzeKeyIndexPath = { 1, 0, 1, 1 };
+        private static readonly int[] SilverKeyIndexPath = { 1, 0, 2, 1 };
+        private static readonly int[] GoldKeyIndexPath = { 1, 0, 3, 1 };
+        // Map-CLOSED source: the bottom HUD panel GameUi.Address -> [13] (the same container that holds
+        // the honour bar at [13][5]); key tiers at [13][1|2|3][1], value wstring @ +0x4C0. Captured live
+        // 2026-06-25 (chest room: GameUi -> [13] -> [1|2|3] -> [1]). Read before the gate so keys show
+        // while the map is closed; values are read fresh here (no staleness in a chest room).
+        private static readonly int[] HudBronzeKeyIndexPath = { 13, 1, 1 };
+        private static readonly int[] HudSilverKeyIndexPath = { 13, 2, 1 };
+        private static readonly int[] HudGoldKeyIndexPath = { 13, 3, 1 };
+
+        // Live Honour as a percentage, derived from the honour bar's fill width (docs §4.7.10).
+        // GameUi.Address is uiManagerPtr (the panel resolves as GameUi.Address -> [84][0], with no
+        // leading [1]). Index path GameUi.Address -> [13][5][1] = the FILL element; its parent (+0xB8)
+        // is the FRAME. honour% = fill.UnscaledSize.X / frame.UnscaledSize.X * 100 (scale cancels; bar
+        // fill = cur/max). The honour subtree keeps valid geometry even when the map hides the bar
+        // (verified: [13] flags 0x..F1 with IsVisible cleared, still frameW=680/fillW=660.5). -1 =
+        // unreadable (HonourKnown=false → threshold rules skip). Fp chain harvested live 2026-06-23.
+        private static double liveHonourPct = -1;
+        private static readonly int[] HonourIndexPath = { 13, 5, 1 };
+        private static readonly uint[] HonourFpChain = { 0x005026F1, 0x00502EF1, 0x00502EF7 };
+        private bool dumpUiFpRequested;
 
         public override void OnEnable(bool isGameOpened)
         {
@@ -29,6 +87,12 @@ namespace SekhemaHelper
                 var opts = new JsonSerializerSettings { ObjectCreationHandling = ObjectCreationHandling.Replace };
                 Settings = JsonConvert.DeserializeObject<SekhemaHelperSettings>(content, opts) ?? Settings;
             }
+
+            // Migration: profiles saved before AfflictionWeights was (re)introduced deserialize it as
+            // null. Backfill from the default table so room-affliction weighting works without losing
+            // the user's other tuned weights.
+            foreach (var profile in Settings.Profiles.Values)
+                profile.AfflictionWeights ??= ProfileContent.CreateDefaultProfile().AfflictionWeights;
 
             this.weightCalculator = new WeightCalculator(Settings);
         }
@@ -45,6 +109,7 @@ namespace SekhemaHelper
 
         public override void DrawSettings()
         {
+            // ---- Profile ----
             ImGui.SeparatorText("Profile");
             if (ImGui.BeginCombo("Active Profile", Settings.CurrentProfile))
             {
@@ -59,23 +124,149 @@ namespace SekhemaHelper
                 ImGui.EndCombo();
             }
 
-            ImGui.SeparatorText("Display");
-            ImGui.Checkbox("Draw Best Path", ref Settings.DrawBestPath);
-            ImGui.SliderFloat("Frame Thickness", ref Settings.FrameThickness, 1f, 10f);
-            ColorSwatch("Best Path Color", ref Settings.BestPathColor);
+            // ---- Weights — {profile} (Reset + Room types / Afflictions / Rewards) ----
+            DrawWeightSettings();
+
             ImGui.Checkbox("Debug (show weights)", ref Settings.DebugEnable);
             if (Settings.DebugEnable)
             {
                 ColorSwatch("Debug Text Color", ref Settings.TextColor);
                 ColorSwatch("Debug Background", ref Settings.BackgroundColor);
+                // Force the Death-crystal route through an explicit crystal-id set (ignores active/collected
+                // state + room filter), to reproduce a routing bug with a known crystal set.
+                ImGui.InputText("Force Crystal IDs (route override)", ref Settings.HazardDebugCrystalIds, 128);
+                ImGuiHelper.ToolTip("Comma/space separated crystal entity ids (read from the yellow/grey id labels). Empty = normal room route.");
+                ImGui.Checkbox("Paint Walkable Grid (where can I walk)", ref Settings.HazardDebugDrawWalkable);
+                ImGuiHelper.ToolTip("Green = cells the game marks walkable, around the player. Shows why an A* leg goes straight (player on a non-walkable cell).");
+                if (Settings.HazardDebugDrawWalkable)
+                    ImGui.SliderFloat("Walkable Paint Radius", ref Settings.HazardDebugWalkableRadius, 50f, 1200f, "%.0f");
                 // Dump every room's content FK pairs (+ the FloorData content vector) to
-                // config\fk_dump.txt on the next frame the Trial map is open. Use to verify
-                // classification / re-map FK offsets after a client patch.
+                // config\fk_dump.txt on the next frame the Trial map is open.
                 if (ImGui.Button("Dump FK -> config\\fk_dump.txt"))
                     this.dumpRequested = true;
+                if (ImGui.Button("Dump Honour candidates -> config\\honour_scan.txt"))
+                    this.scanHonourRequested = true;
+                ImGui.InputInt("Honour current", ref this.honourScanCur);
+                ImGui.InputInt("Honour max", ref this.honourScanMax);
+                if (ImGui.Button("Locate Honour by value -> config\\honour_byvalue.txt") &&
+                    this.honourScanCur > 0 && this.honourScanMax > 0)
+                    this.scanHonourByValueRequested = true;
+                if (ImGui.Button("Dump UI fingerprints -> config\\ui_fp_dump.txt"))
+                    this.dumpUiFpRequested = true;
             }
 
-            DrawWeightSettings();
+            // ---- Display ----
+            ImGui.SeparatorText("Display");
+            ImGui.Checkbox("Draw Best Path", ref Settings.DrawBestPath);
+            ImGui.SliderFloat("Frame Thickness", ref Settings.FrameThickness, 1f, 10f);
+            ColorSwatch("Best Path Color", ref Settings.BestPathColor);
+
+            // ---- Overlay POI (Portals / Levers / Crystals) ----
+            if (ImGui.CollapsingHeader("Overlay POI"))
+            {
+                ImGui.Indent();
+
+                ImGui.Checkbox("Show Portals (Ritual)", ref Settings.ShowPortals);
+                ImGuiHelper.ToolTip("Mark ACTIVE hazard Portals on the large map. Removed once a portal closes.");
+                if (Settings.ShowPortals)
+                    ColorSwatch("Portal Color", ref Settings.PortalColor);
+
+                ImGui.Checkbox("Show Levers (Gauntlet)", ref Settings.ShowLevers);
+                ImGuiHelper.ToolTip("Mark the un-activated Sanctum lever on the large map. Removed once pulled.");
+                if (Settings.ShowLevers)
+                    ColorSwatch("Lever Color", ref Settings.LeverColor);
+
+                if (Settings.ShowPortals || Settings.ShowLevers)
+                    ImGui.SliderFloat("POI Marker Radius", ref Settings.RoomObjectMarkerRadius, 4f, 20f);
+
+                ImGui.Spacing();
+                ImGui.Checkbox("Show Crystals (Escape)", ref Settings.DrawHazardRoute);
+                ImGuiHelper.ToolTip("Death-crystal (HourglassLethal) collection route + markers on the map overlay.");
+                if (Settings.DrawHazardRoute)
+                {
+                    ImGui.Checkbox("Follow Walkable Terrain (A*)", ref Settings.HazardWalkableRoute);
+                    ImGuiHelper.ToolTip("On: route follows the walkable path like Radar. Off: straight lines.");
+                    ColorSwatch("Route Line Color", ref Settings.HazardRouteColor);
+                    ImGui.SameLine();
+                    ColorSwatch("Crystal Marker Color", ref Settings.HazardMarkerColor);
+                    ImGui.SliderFloat("Route Thickness", ref Settings.HazardRouteThickness, 1f, 8f);
+                    ImGui.SliderFloat("Marker Radius", ref Settings.HazardMarkerRadius, 3f, 20f);
+                    ImGui.SliderFloat("Max Grid Distance (0 = all)", ref Settings.HazardMaxGridDistance, 0f, 500f, "%.0f");
+                    ImGui.SliderInt("Room ID Gap (0 = off)", ref Settings.HazardIdGroupGap, 0, 200);
+                    ImGuiHelper.ToolTip("Crystals of one room share contiguous entity ids; a larger gap = another room. Only the player's room is routed.");
+                    ImGui.SliderFloat("Room Margin (in-room gate)", ref Settings.HazardRoomMargin, 0f, 800f, "%.0f");
+                    ImGuiHelper.ToolTip("Route shows only when the player is within the crystal room's bounding box + this margin. Prevents it appearing from an adjacent room.");
+                }
+
+                ImGui.Unindent();
+            }
+
+            ImGui.Separator();
+
+            // ---- Final-room chest priority ----
+            ImGui.Checkbox("Mark Best Chests by Keys", ref Settings.DrawChestPriority);
+            ImGuiHelper.ToolTip("In the reward room, marks the best chests on the large map. For each key\n" +
+                "tier it highlights the top-N chests by content priority, where N = your live\n" +
+                "Bronze/Silver/Gold key count.");
+            if (Settings.DrawChestPriority)
+            {
+                ColorSwatch("Selected Marker Color", ref Settings.ChestMarkerColor);
+                ImGui.SliderFloat("Chest Marker Radius", ref Settings.ChestMarkerRadius, 4f, 24f);
+                Settings.ChestPriorityOrder ??= ChestPriority.DefaultOrder();
+                Settings.ChestDisabledContent ??= new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+                if (ImGui.TreeNode("Content priority (top = best)"))
+                {
+                    ImGui.TextDisabled("Tick a type to track it; higher in the list = higher priority.\n" +
+                        "Un-tick types you don't want marked (to track only a few, un-tick the rest).\n" +
+                        "Use the arrows to reorder.");
+                    var order = Settings.ChestPriorityOrder;
+                    var off = Settings.ChestDisabledContent;
+                    int moveFrom = -1, moveTo = -1;
+                    if (ImGui.BeginTable("chestPrio", 2,
+                        ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.SizingFixedFit))
+                    {
+                        ImGui.TableSetupColumn("##move", ImGuiTableColumnFlags.WidthFixed, 64f);
+                        ImGui.TableSetupColumn("Content", ImGuiTableColumnFlags.WidthStretch);
+                        for (int i = 0; i < order.Count; i++)
+                        {
+                            ImGui.TableNextRow();
+                            ImGui.TableSetColumnIndex(0);
+                            ImGui.PushID(i);
+                            if (ImGui.ArrowButton("up", ImGuiDir.Up) && i > 0)
+                            {
+                                moveFrom = i; moveTo = i - 1;
+                            }
+                            ImGui.SameLine();
+                            if (ImGui.ArrowButton("down", ImGuiDir.Down) && i < order.Count - 1)
+                            {
+                                moveFrom = i; moveTo = i + 1;
+                            }
+                            ImGui.TableSetColumnIndex(1);
+                            bool enabled = !off.Contains(order[i]);
+                            if (ImGui.Checkbox($"{i + 1}.  {order[i]}", ref enabled))
+                            {
+                                if (enabled) off.Remove(order[i]);
+                                else off.Add(order[i]);
+                            }
+                            ImGui.PopID();
+                        }
+                        ImGui.EndTable();
+                    }
+                    // Apply at most one move per frame (after the loop, so the table isn't mutated mid-draw).
+                    if (moveFrom >= 0 && moveTo >= 0)
+                    {
+                        var item = order[moveFrom];
+                        order.RemoveAt(moveFrom);
+                        order.Insert(moveTo, item);
+                    }
+                    if (ImGui.Button("Reset chest priority order"))
+                    {
+                        Settings.ChestPriorityOrder = ChestPriority.DefaultOrder();
+                        Settings.ChestDisabledContent = ChestPriority.DefaultDisabled();
+                    }
+                    ImGui.TreePop();
+                }
+            }
         }
 
         // Edit the active profile's weights in place. Everything lives in Settings.Profiles, which is
@@ -132,13 +323,63 @@ namespace SekhemaHelper
                 return;
 
             var drawList = ImGui.GetBackgroundDrawList();
+
+            // "Death crystal" (HourglassLethal) collection route — drawn on the map overlay (large map
+            // + minimap) like Radar, independent of the Trial map panel.
+            if (this.scanHonourRequested)
+            {
+                this.scanHonourRequested = false;
+                HonourReader.DumpCandidates(Path.Join(DllDirectory, "config", "honour_scan.txt"));
+            }
+
+            if (this.scanHonourByValueRequested)
+            {
+                this.scanHonourByValueRequested = false;
+                HonourReader.ScanForPair(this.honourScanCur, this.honourScanMax,
+                    Path.Join(DllDirectory, "config", "honour_byvalue.txt"));
+            }
+
+            // The route draws into its own transparent culling windows (like Radar), not this draw
+            // list, so the in-game map texture can't hide it. It manages its own ImGui.Begin/End.
+            HazardRoute.Draw(Settings);
+
+            // Room interactables (Portals / Lever) on the large map, coloured by used/activated state
+            // (§12). Self-gates on large-map visibility; independent of the Trial map panel below.
+            RoomObjects.Draw(Settings);
+
             var gameUi = Core.States.InGameStateObject.GameUi;
+
             var panel = gameUi?.SekhemasTrialMapPanel;
             if (panel == null)
             {
                 DebugHud(drawList, "panel = null (not in Trial?)");
                 return;
             }
+
+            // Honour% from the bottom-HUD bar fill geometry (docs §4.7.10) — read here, BEFORE the
+            // map-visibility gate: when the map opens the honour bar relocates to the top and the
+            // bottom bar at [1][13][5] is hidden, so we'd read nothing. Reading while the map is
+            // closed (bar present) and caching the last value is correct — honour can't change while
+            // you're paused on the map. Replaces the retired HonourReader heap scan.
+            var uiHonourPct = ReadHonourPctFromUi(gameUi.Address);
+            if (uiHonourPct >= 0)
+                liveHonourPct = uiHonourPct;
+            // Key counts from the bottom HUD panel (works while the map is CLOSED, e.g. chest room).
+            // Read before the visibility gate; cached so they persist on screen.
+            CacheKeysFrom(gameUi.Address, HudBronzeKeyIndexPath, HudSilverKeyIndexPath, HudGoldKeyIndexPath);
+            // Final-room chest priority: mark the best openable chests on the large map using the live
+            // key budget (§11.3/§11.5). Self-gates on large-map visibility; uses this frame's key counts.
+            ChestPriority.Draw(Settings, liveBronze, liveSilver, liveGold);
+            // Harvest fp chains (debug): dump the learned chains + a live walk. Honour only exists while
+            // the map is CLOSED and water only while it's OPEN, so the chains are learned in-memory frame
+            // by frame — walk around (learns honour) then open the map (learns water), then dump both.
+            if (this.dumpUiFpRequested)
+            {
+                this.dumpUiFpRequested = false;
+                DumpUiFingerprints(panel.Address, gameUi.Address);
+            }
+            if (Settings.DebugEnable)
+                DrawResourcesHud(drawList);
             if (!panel.IsVisible)
             {
                 DebugHud(drawList, $"panel 0x{panel.Address.ToInt64():X} not visible (map closed)");
@@ -158,8 +399,17 @@ namespace SekhemaHelper
 
             ClassifyRooms(floor);
 
-            // Player stats for dynamic affliction weights (best-effort; deltas summed).
             this.weightCalculator ??= new WeightCalculator(Settings);
+            // Live water + key counts from the visible map panel's counter text (docs §4.7.9 / §4.6).
+            // Cached so the HUD can keep showing them once the map closes.
+            var uiWater = ReadSacredWaterFromUi(panel.Address);
+            if (uiWater >= 0)
+                liveWater = uiWater;
+            CacheKeysFrom(panel.Address, BronzeKeyIndexPath, SilverKeyIndexPath, GoldKeyIndexPath);
+
+            // Player defensive stats for the dynamic affliction model (a "no Armour" curse hurts an
+            // armour build far more than an evasion one). Best-effort; 0 when unknown → dynamic terms
+            // collapse and the static affliction weight is used. NOT the removed runState scan.
             ReadPlayerStats(out var evasion, out var es, out var armour, out var life, out var qotf);
             this.weightCalculator.Evasion = evasion;
             this.weightCalculator.EnergyShield = es;
@@ -207,17 +457,59 @@ namespace SekhemaHelper
             }
         }
 
+        // Player defensive stats for WeightCalculator's dynamic affliction model. Read from the player's
+        // Stats component (standard GameHelper entity component) — NOT the runState active-effect scan.
+        private static void ReadPlayerStats(out int evasion, out int energyShield, out int armour, out int life, out bool qotf)
+        {
+            evasion = 0;
+            energyShield = 0;
+            armour = 0;
+            life = 0;
+            qotf = false;
+            var player = Core.States.InGameStateObject.CurrentAreaInstance.Player;
+            if (player == null || !player.TryGetComponent<Stats>(out var stats))
+                return;
+            // Confirmed live 2026-06-10 (Research --stats vs character sheet):
+            //  - effective Evasion / Max ES match StatsChangedByItems (NOT the sum of both dicts).
+            //    The items layer is the player's OWN gear/passive total; the buff layer can carry
+            //    transient externals (e.g. another player's ES aura), which must NOT count for a
+            //    solo Sekhema run, so we read the items layer here.
+            //  - the Queen-of-the-Forest stat is granted via the buff/action layer
+            //    (key 9490 movement_speed_is_only_base_…_per_x_evasion_rating: items=0, buffs>0 when worn).
+            // Armour (235) and Max Life (239) added for the relevance-based affliction model
+            // (see WeightCalculator.DynamicAffliction). Stat ids verified vs game_dat/Stats.tsv.
+            evasion = ItemStat(stats, GameStats.evasion_rating);
+            energyShield = ItemStat(stats, GameStats.maximum_energy_shield);
+            armour = ItemStat(stats, GameStats.armour);
+            life = ItemStat(stats, GameStats.maximum_life);
+            qotf = StatValue(stats, GameStats.movement_speed_is_only_base_positive_1percentage_per_x_evasion_rating) > 0;
+        }
+
+        // Effective value from the items layer (matches the in-game character sheet).
+        private static int ItemStat(Stats stats, GameStats key)
+            => stats.StatsChangedByItems != null && stats.StatsChangedByItems.TryGetValue(key, out var v) ? v : 0;
+
+        // Sum across both stat dicts (used for buff/action-granted stats like QotF).
+        private static int StatValue(Stats stats, GameStats key)
+        {
+            int v = 0;
+            if (stats.StatsChangedByItems != null && stats.StatsChangedByItems.TryGetValue(key, out var a))
+                v += a;
+            if (stats.StatsChangedByBuffAndActions != null && stats.StatsChangedByBuffAndActions.TryGetValue(key, out var b))
+                v += b;
+            return v;
+        }
+
         // Classify each revealed room from the FloorData content vector (FloorData+0x18, stride 0x40),
         // each entry keyed by (layer,room) in its first two bytes and carrying up to 3 content FK
         // pairs {row, table} at +0x08 + k*0x10:
         //   SanctumRooms.dat  -> fight room "Caverns_<TYPE>_NN" (type) OR "Caverns_Treasure..." (reward)
-        //   SanctumPersistentEffects.dat -> affliction (display name at row+0x28)
         //
         // This reads the game-data structure directly (verified live 2026-06-20: ids like
-        // "Caverns_Arena_02" and affliction names like "Fiendish Wings" resolve here). It replaces the
-        // old per-widget read at widget+0x4D8, which a client patch left empty — every room then fell
-        // back to base weight, so editing the weight tables had no effect on the chosen path. Only
-        // revealed rooms have entries in this vector; deeper rooms stay unclassified (weight = base).
+        // "Caverns_Arena_02" resolve here). It replaces the old per-widget read at widget+0x4D8, which a
+        // client patch left empty — every room then fell back to base weight, so editing the weight
+        // tables had no effect on the chosen path. Only revealed rooms have entries in this vector;
+        // deeper rooms stay unclassified (weight = base).
         private static void ClassifyRooms(SekhemaFloor floor)
         {
             if (floor.FloorDataAddr == IntPtr.Zero)
@@ -247,6 +539,8 @@ namespace SekhemaHelper
 
                     if (tpath.IndexOf("SanctumPersistentEffects", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
+                        // Room-imposed affliction (display name @ row+0x28). FloorData-derived, not the
+                        // player's active-effect state — feeds AfflictionWeight in WeightCalculator.
                         var name = Mem.ReadWideString(Mem.Read<IntPtr>(rowPtr + 0x28), 48);
                         if (!string.IsNullOrEmpty(name))
                             room.Affliction = name;
@@ -429,48 +723,227 @@ namespace SekhemaHelper
             return true;
         }
 
-        private static void ReadPlayerStats(out int evasion, out int energyShield, out int armour, out int life, out bool qotf)
+        // Resolve the Sacred Water counter leaf by Flags-fingerprint walk (docs §2b), then read the
+        // displayed std::wstring at +0x4C0 and parse it (strips thousands separators, e.g. "6 267").
+        // Returns -1 if the leaf can't be resolved or the text isn't numeric. Panel must be populated.
+        private static int ReadSacredWaterFromUi(IntPtr panelAddr)
         {
-            evasion = 0;
-            energyShield = 0;
-            armour = 0;
-            life = 0;
-            qotf = false;
-            var player = Core.States.InGameStateObject.CurrentAreaInstance.Player;
-            if (player == null || !player.TryGetComponent<Stats>(out var stats))
-                return;
-            // Confirmed live 2026-06-10 (Research --stats vs character sheet):
-            //  - effective Evasion / Max ES match StatsChangedByItems (NOT the sum of both dicts).
-            //    The items layer is the player's OWN gear/passive total; the buff layer can carry
-            //    transient externals (e.g. another player's ES aura), which must NOT count for a
-            //    solo Sekhema run, so we read the items layer here.
-            //  - the Queen-of-the-Forest stat is granted via the buff/action layer
-            //    (key 9490 movement_speed_is_only_base_…_per_x_evasion_rating: items=0, buffs>0 when worn).
-            // Armour (235) and Max Life (239) added for the relevance-based affliction model
-            // (see WeightCalculator.DynamicAffliction). Stat ids verified vs game_dat/Stats.tsv.
-            evasion = ItemStat(stats, GameStats.evasion_rating);
-            energyShield = ItemStat(stats, GameStats.maximum_energy_shield);
-            armour = ItemStat(stats, GameStats.armour);
-            life = ItemStat(stats, GameStats.maximum_life);
-            qotf = StatValue(stats, GameStats.movement_speed_is_only_base_positive_1percentage_per_x_evasion_rating) > 0;
+            var leaf = ResolveLeaf(panelAddr, WaterIndexPath, WaterFpChain, IsWaterLeaf);
+            return leaf == IntPtr.Zero ? -1 : ParseDigits(Mem.ReadStdWString(leaf + WaterTextWStringOffset));
         }
 
-        // Effective value from the items layer (matches the in-game character sheet).
-        private static int ItemStat(Stats stats, GameStats key)
-            => stats.StatsChangedByItems != null && stats.StatsChangedByItems.TryGetValue(key, out var v) ? v : 0;
-
-        // Sum across both stat dicts (used for buff/action-granted stats like QotF).
-        private static int StatValue(Stats stats, GameStats key)
+        // Read one key-tier counter by its index path (Bronze/Silver/Gold share the water leaf layout:
+        // displayed number is the std::wstring at leaf+0x4C0). -1 if unresolved/non-numeric.
+        private static int ReadKeyFromUi(IntPtr root, int[] indexPath)
         {
-            int v = 0;
-            if (stats.StatsChangedByItems != null && stats.StatsChangedByItems.TryGetValue(key, out var a))
-                v += a;
-            if (stats.StatsChangedByBuffAndActions != null && stats.StatsChangedByBuffAndActions.TryGetValue(key, out var b))
-                v += b;
-            return v;
+            var leaf = ResolveByIndex(root, indexPath, out _);
+            return leaf == IntPtr.Zero ? -1 : ParseDigits(Mem.ReadStdWString(leaf + WaterTextWStringOffset));
         }
 
-        // Always-on status line (when Debug is on) so failures are visible instead of a blank overlay.
+        // Read the three key tiers from a root + paths; update each cached value only on a valid read
+        // (so a closed/absent panel leaves the last-known count on screen instead of blanking it).
+        private static void CacheKeysFrom(IntPtr root, int[] bronze, int[] silver, int[] gold)
+        {
+            int b = ReadKeyFromUi(root, bronze);
+            int s = ReadKeyFromUi(root, silver);
+            int g = ReadKeyFromUi(root, gold);
+            if (b >= 0) liveBronze = b;
+            if (s >= 0) liveSilver = s;
+            if (g >= 0) liveGold = g;
+        }
+
+        // Terminal validator: a water leaf is one whose +0x4C0 std::wstring parses to a number.
+        private static bool IsWaterLeaf(IntPtr leaf) =>
+            ParseDigits(Mem.ReadStdWString(leaf + WaterTextWStringOffset)) >= 0;
+
+        // Strip thousands separators (game draws "6 267" with a narrow space) and parse. -1 if no digits.
+        private static int ParseDigits(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return -1;
+            var digits = new StringBuilder(text.Length);
+            foreach (var ch in text)
+                if (ch >= '0' && ch <= '9')
+                    digits.Append(ch);
+            return digits.Length > 0 && int.TryParse(digits.ToString(), out var v) ? v : -1;
+        }
+
+        // Honour percentage from the honour bar fill geometry (docs §4.7.10). Resolve the FILL leaf by
+        // Flags-fingerprint walk, take its parent (+0xB8) as the FRAME: the game sizes the fill to
+        // cur/max of the frame width, so fill.X / frame.X == honour fraction (verified 666.18/680.0 =
+        // 0.97968 = 6267/6397). UnscaledSize ratio is scale-invariant. -1 if unreadable.
+        private static double ReadHonourPctFromUi(IntPtr root)
+        {
+            var fill = ResolveLeaf(root, HonourIndexPath, HonourFpChain, IsHonourFill);
+            return fill == IntPtr.Zero ? -1 : HonourPctFromFill(fill);
+        }
+
+        // Terminal validator: an honour fill is a leaf whose parent gives a sane fill/frame width ratio.
+        private static bool IsHonourFill(IntPtr fill) => HonourPctFromFill(fill) >= 0;
+
+        private static double HonourPctFromFill(IntPtr fill)
+        {
+            var frame = Mem.Read<IntPtr>(fill + UiParentOffset);
+            if (frame == IntPtr.Zero)
+                return -1;
+            float frameW = Mem.Read<float>(frame + UiUnscaledSizeXOffset);
+            float fillW = Mem.Read<float>(fill + UiUnscaledSizeXOffset);
+            if (!float.IsFinite(frameW) || !float.IsFinite(fillW) || frameW <= 1f || fillW < 0f)
+                return -1;
+            double pct = fillW / frameW * 100.0;
+            if (pct < 0 || pct > 105)
+                return -1;
+            return pct > 100 ? 100 : pct;
+        }
+
+        // ── UITree leaf resolution: index primary, Flags-fingerprint fallback (docs §2b) ─────────
+        // The index path is authoritative while it lands on a terminal-valid leaf (indices are correct
+        // until a client patch shifts them). When it breaks, fall back to the harvested fp chain: the
+        // stable Flags role-bits still locate the element though it moved. Fp is the recovery path, not
+        // the primary, because these fingerprints are generic and the terminals weak (see field notes).
+        private static IntPtr ResolveLeaf(IntPtr root, int[] indexPath, uint[] fpChain, Func<IntPtr, bool> terminalValid)
+        {
+            if (root == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            var byIdx = ResolveByIndex(root, indexPath, out _);
+            if (byIdx != IntPtr.Zero && terminalValid(byIdx))
+                return byIdx;
+
+            if (fpChain.Length == indexPath.Length)
+            {
+                var byFp = WalkFp(root, fpChain, 0, terminalValid);
+                if (byFp != IntPtr.Zero)
+                    return byFp;
+            }
+            return IntPtr.Zero;
+        }
+
+        // Backtracking Flags-fingerprint walk (mirrors RunecraftHelper.WalkFp). At each step, scan the
+        // parent's children for ones whose Flags (IsVisible masked) match chain[step] — visible
+        // candidates first — and recurse until a branch reaches a leaf the terminal validator accepts.
+        private static IntPtr WalkFp(IntPtr parent, uint[] chain, int step, Func<IntPtr, bool> terminalValid)
+        {
+            if (step == chain.Length)
+                return terminalValid(parent) ? parent : IntPtr.Zero;
+            if (!TryChildren(parent, out var first, out var count))
+                return IntPtr.Zero;
+
+            uint target = chain[step] & ~IsVisibleMask;
+            for (int pass = 0; pass < 2; pass++)
+            {
+                bool wantVisible = pass == 0;
+                for (long i = 0; i < count; i++)
+                {
+                    var child = Mem.Read<IntPtr>(first + (int)(i * IntPtr.Size));
+                    if (child == IntPtr.Zero)
+                        continue;
+                    uint flags = Mem.Read<uint>(child + UiElementFlagsOffset);
+                    if ((flags & ~IsVisibleMask) != target)
+                        continue;
+                    if (((flags & IsVisibleMask) != 0) != wantVisible)
+                        continue;
+                    var deeper = WalkFp(child, chain, step + 1, terminalValid);
+                    if (deeper != IntPtr.Zero)
+                        return deeper;
+                }
+            }
+            return IntPtr.Zero;
+        }
+
+        // Resolve via the legacy index path, recording each hop's Flags so the chain can be learned.
+        private static IntPtr ResolveByIndex(IntPtr root, int[] path, out uint[] chain)
+        {
+            chain = Array.Empty<uint>();
+            var cur = root;
+            var rec = new uint[path.Length];
+            for (int i = 0; i < path.Length; i++)
+            {
+                if (!TryChildren(cur, out var first, out var count) || path[i] >= count)
+                    return IntPtr.Zero;
+                cur = Mem.Read<IntPtr>(first + path[i] * IntPtr.Size);
+                if (cur == IntPtr.Zero)
+                    return IntPtr.Zero;
+                rec[i] = Mem.Read<uint>(cur + UiElementFlagsOffset);
+            }
+            chain = rec;
+            return cur;
+        }
+
+        // Read an element's children StdVector (First @ +0x10, Last @ +0x18). Count = (Last-First)/8.
+        private static bool TryChildren(IntPtr elem, out IntPtr first, out long count)
+        {
+            first = IntPtr.Zero;
+            count = 0;
+            if (elem == IntPtr.Zero)
+                return false;
+            first = Mem.Read<IntPtr>(elem + UiChildrenFirstOffset);
+            var last = Mem.Read<IntPtr>(elem + UiChildrenFirstOffset + 8);
+            if (first == IntPtr.Zero || last.ToInt64() <= first.ToInt64())
+                return false;
+            count = (last.ToInt64() - first.ToInt64()) / IntPtr.Size;
+            return count > 0 && count <= 4000;
+        }
+
+        // Debug recon: dump the resolved Flags chains for the water/honour leaves (raw + masked) plus
+        // each hop's address/flags/size, to config\ui_fp_dump.txt. Run it in a Trial (water needs the
+        // map open) to harvest the fingerprints, so they can be baked as static constants (docs §2b).
+        private void DumpUiFingerprints(IntPtr panelAddr, IntPtr gameUiAddr)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"panel=0x{panelAddr.ToInt64():X} gameUi=0x{gameUiAddr.ToInt64():X}");
+            sb.AppendLine();
+            sb.AppendLine("== Sacred Water (panel -> [1][0][0][1]) ==");
+            DumpChain(sb, panelAddr, WaterIndexPath, WaterFpChain, leaf =>
+                $"text=\"{Mem.ReadStdWString(leaf + WaterTextWStringOffset)}\"");
+            sb.AppendLine();
+            sb.AppendLine("== Honour fill (gameUi -> [13][5][1]) ==");
+            DumpChain(sb, gameUiAddr, HonourIndexPath, HonourFpChain, fill =>
+            {
+                var frame = Mem.Read<IntPtr>(fill + UiParentOffset);
+                return $"frameW={Mem.Read<float>(frame + UiUnscaledSizeXOffset):F1} " +
+                       $"fillW={Mem.Read<float>(fill + UiUnscaledSizeXOffset):F1} pct={HonourPctFromFill(fill):F1}";
+            });
+
+            var dir = Path.GetDirectoryName(SettingPathname);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Join(dir, "ui_fp_dump.txt"), sb.ToString());
+        }
+
+        private static void DumpChain(StringBuilder sb, IntPtr root, int[] path, uint[] bakedChain, Func<IntPtr, string> describeLeaf)
+        {
+            sb.AppendLine($"  baked chain: [{string.Join(", ", Array.ConvertAll(bakedChain, f => $"0x{f:X8}"))}]");
+            var cur = root;
+            for (int i = 0; i < path.Length; i++)
+            {
+                if (!TryChildren(cur, out var first, out var count) || path[i] >= count)
+                {
+                    sb.AppendLine($"  [{path[i]}] <unresolved> (count={count})");
+                    return;
+                }
+                cur = Mem.Read<IntPtr>(first + path[i] * IntPtr.Size);
+                uint flags = Mem.Read<uint>(cur + UiElementFlagsOffset);
+                sb.AppendLine($"  [{path[i]}] 0x{cur.ToInt64():X} flags=0x{flags:X8} masked=0x{flags & ~IsVisibleMask:X8} " +
+                              $"sizeX={Mem.Read<float>(cur + UiUnscaledSizeXOffset):F1}");
+            }
+            sb.AppendLine($"  leaf: {describeLeaf(cur)}");
+        }
+
+        // Minimal resources HUD (when Debug is on): just the live Sacred Water + Honour readout.
+        private static void DrawResourcesHud(ImDrawListPtr drawList)
+        {
+            var waterStr = liveWater >= 0 ? liveWater.ToString() : "?";
+            var honourStr = liveHonourPct >= 0 ? $"{liveHonourPct:F0}%" : "?";
+            string K(int v) => v >= 0 ? v.ToString() : "?";
+            var text = $"water {waterStr}, honour {honourStr}, keys {K(liveBronze)}/{K(liveSilver)}/{K(liveGold)} (B/S/G)";
+            var pos = new Vector2(20f, 160f);
+            var size = ImGui.CalcTextSize(text);
+            drawList.AddRectFilled(pos - new Vector2(4, 2), pos + size + new Vector2(4, 2),
+                ImGuiHelper.Color(new Vector4(0f, 0f, 0f, 0.8f)));
+            drawList.AddText(pos, ImGuiHelper.Color(new Vector4(0.5f, 1f, 0.6f, 1f)), text);
+        }
+
         private void DebugHud(ImDrawListPtr drawList, string text)
         {
             if (!Settings.DebugEnable)

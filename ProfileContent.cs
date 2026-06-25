@@ -7,6 +7,10 @@ namespace SekhemaHelper
     public class ProfileContent
     {
         public Dictionary<string, float> RoomTypeWeights { get; set; }
+        // Penalty (usually negative) for a room that imposes a given affliction, keyed by its in-game
+        // display name. Read from FloorData (SanctumPersistentEffects.dat) — NOT the player's active
+        // effects. Stat-removing curses (Iron Manacles, Sharpened Arrowhead, …) default to 0 because
+        // their cost is build-dependent; tune per profile.
         public Dictionary<string, float> AfflictionWeights { get; set; }
         public Dictionary<string, float> RewardWeights { get; set; }
 

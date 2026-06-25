@@ -2,27 +2,30 @@ using System.Text;
 
 namespace SekhemaHelper
 {
-    // Ported from legacy WeightCalculator. weight = base + roomType + affliction + reward + connectivity.
-    // Dynamic affliction weights depend on the player's defensive profile (Armour / Evasion / Energy
-    // Shield / Life / Queen-of-the-Forest). A stat-removing curse is weighted by how much that stat
-    // actually contributes to the player's defence, so an evasion build ignores "no Armour" while an
-    // armour tank ignores "no Evasion". See docs/re-findings.md and DynamicAffliction below.
+    // Base room weighting. weight = base + roomType + affliction + reward (+ connectivity for info only).
+    // Connectivity is consumed by PathFinder as a lexicographic tie-breaker, not folded into the weight.
+    //
+    // Stat-removing afflictions are weighted DYNAMICALLY by the player's defensive profile (Armour /
+    // Evasion / Energy Shield / Life / Queen-of-the-Forest): a "no Armour" curse barely matters to an
+    // evasion build, while it's brutal for an armour tank. These come from the player's Stats component
+    // (set by the core each refresh) — NOT the removed runState active-effect scan. When the stats are
+    // unknown (all 0) the dynamic terms collapse to ~0 and the static profile weight is used instead.
     public sealed class WeightCalculator
     {
         private readonly SekhemaHelperSettings settings;
         private readonly StringBuilder debug = new();
 
-        // Effective player stats for the current frame (set by the core each refresh).
+        // Effective player stats for the current frame (set by the core each refresh via ReadPlayerStats).
         public int Evasion;
         public int EnergyShield;
         public int Armour;
         public int Life;
         public bool HasQueenOfTheForest;
 
-        // Relevance model tuning. K = max penalty when a curse removes the player's entire main
-        // defence layer (matches the legacy "strongly avoid" magnitude). REF_MIT floors the
-        // Armour+Evasion denominator so that a build with little total mitigation rating scales its
-        // penalties down (nothing meaningful to lose) instead of splitting 50/50 on noise.
+        // Relevance model tuning. K = max penalty when a curse removes the player's entire main defence
+        // layer (matches the legacy "strongly avoid" magnitude). RefMitigation floors the Armour+Evasion
+        // denominator so a build with little total mitigation rating scales its penalties down (nothing
+        // meaningful to lose) instead of splitting 50/50 on noise.
         private const double K = 5000;
         private const double RefMitigation = 4000;
 
@@ -41,7 +44,11 @@ namespace SekhemaHelper
             weight += RoomTypeWeight(room, profile);
             weight += AfflictionWeight(room, profile);
             weight += RewardWeight(room, profile);
-            weight += ConnectivityBonus(room);
+            // Connectivity is NOT folded into the additive weight. As a flat +100 for >1 exit it
+            // could override a better reward (two rooms feeding the SAME next room — the worse-reward one
+            // winning on connectivity). It is now a strict TIE-BREAKER in PathFinder (reward first, then
+            // connectivity), so it only steers among reward-equal routes. Shown here for info only.
+            AppendConnectivityDebug(room);
             return (weight, debug.ToString());
         }
 
@@ -57,6 +64,10 @@ namespace SekhemaHelper
             return 0;
         }
 
+        // Penalty for the affliction a room imposes (room.Affliction, from FloorData). This is the ROOM's
+        // affliction, distinct from the player's active effects (that detection was removed — no stable
+        // read). Stat-removing curses are weighted dynamically by the player's defensive profile; the
+        // rest fall through to the static profile table. Absent names contribute 0.
         private double AfflictionWeight(SekhemaRoom room, ProfileContent profile)
         {
             if (string.IsNullOrEmpty(room.Affliction))
@@ -65,14 +76,16 @@ namespace SekhemaHelper
             var dyn = DynamicAffliction(room.Affliction);
             if (dyn.HasValue)
             {
-                debug.AppendLine($"{room.Affliction}:{dyn.Value}");
+                debug.AppendLine($"{room.Affliction}:{dyn.Value:F0} (dyn)");
                 return dyn.Value;
             }
-            if (profile.AfflictionWeights.TryGetValue(room.Affliction, out var w))
+            if (profile.AfflictionWeights != null && profile.AfflictionWeights.TryGetValue(room.Affliction, out var w))
             {
                 debug.AppendLine($"{room.Affliction}:{w}");
                 return w;
             }
+            // Unknown affliction: still flag its presence so the advice isn't silently blind to it.
+            debug.AppendLine($"{room.Affliction}:0 (unlisted)");
             return 0;
         }
 
@@ -117,11 +130,9 @@ namespace SekhemaHelper
             return 0;
         }
 
-        private double ConnectivityBonus(SekhemaRoom room)
-        {
-            int bonus = room.NextConnections.Count > 1 ? 100 : 0;
-            debug.AppendLine($"Connectivity:{bonus}");
-            return bonus;
-        }
+        // Connectivity (number of forward exits) is consumed by PathFinder as a lexicographic
+        // tie-breaker, not as a weight. Shown in the room debug text for visibility only.
+        private void AppendConnectivityDebug(SekhemaRoom room)
+            => debug.AppendLine($"Connectivity:{room.NextConnections.Count} (tiebreak)");
     }
 }
